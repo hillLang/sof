@@ -36,21 +36,54 @@ void platform_timer_stop(struct timer *timer)
 		   shim_read(SHIM_DSPWCTCS) & ~SHIM_DSPWCTCS_T0A);
 }
 
+/* clock ticks it takes to set clock and enable IRQ */
+#define TIMER_OVERHEAD	500
+
+/* max time it should take to do 2 subsequenmt timer reads */
+#define TIMER_READ_TIME	256
+
+static spinlock_t timer_lock = {0};
+
 int64_t platform_timer_set(struct timer *timer, uint64_t ticks)
 {
+	uint64_t ticks_now[2];
+	uint32_t flags;
+
 	/* a tick value of 0 will not generate an IRQ */
 	if (ticks == 0)
 		ticks = 1;
 
-	/* Check if requested time is not past time */
-	if (ticks > shim_read64(SHIM_DSPWC))
+	spin_lock_irq(&timer_lock, flags);
+
+	/* 64bit reads are non atomic on xtensa so we must
+	 * read a stable value where there is no bit 32 flipping.
+	 * A large delta between reads[0..1] means we have flipped
+	 * and that the value read back in either 0..1] is invalid.
+	 */
+	do {
+		ticks_now[0] = shim_read64(SHIM_DSPWC);
+		ticks_now[1] = shim_read64(SHIM_DSPWC);
+
+		/* worst case is we perform this twice so 4 clock reads */
+	} while (ticks_now[1] - ticks_now[0] > TIMER_READ_TIME);
+
+	/* Check if requested time is not past time and include the
+	 * overhead of changing the timer
+	 */
+	if (ticks > ticks_now[1] + TIMER_OVERHEAD) {
 		shim_write64(SHIM_DSPWCT0C, ticks);
-	else
-		shim_write64(SHIM_DSPWCT0C, shim_read64(SHIM_DSPWC) +
-			     TIMER_MIN_RECOVER_CYCLES);
+	} else {
+		ticks = ticks_now[1] + TIMER_MIN_RECOVER_CYCLES;
+		if (ticks == 0)
+			ticks = 1;
+
+		shim_write64(SHIM_DSPWCT0C, ticks);
+	}
 
 	/* Enable IRQ */
 	shim_write(SHIM_DSPWCTCS, SHIM_DSPWCTCS_T0A);
+
+	spin_unlock_irq(&timer_lock, flags);
 
 	return shim_read64(SHIM_DSPWCT0C);
 }
@@ -63,8 +96,33 @@ void platform_timer_clear(struct timer *timer)
 
 uint64_t platform_timer_get(struct timer *timer)
 {
-//	return arch_timer_get_system(timer);
-	return (uint64_t)shim_read64(SHIM_DSPWC);
+	uint64_t ticks_now[2];
+
+	/* 64bit reads are non atomic on xtensa so we must
+	 * read a stable value where there is no bit 32 flipping.
+	 * A large delta between reads[0..1] means we have flipped
+	 * and that the value read back in either 0..1] is invalid.
+	 */
+	do {
+		ticks_now[0] = shim_read64(SHIM_DSPWC);
+		ticks_now[1] = shim_read64(SHIM_DSPWC);
+
+		/* worst case is we perform this twice so 4 clock reads */
+	} while (ticks_now[1] - ticks_now[0] > TIMER_READ_TIME);
+
+	return ticks_now[1]; /* most recent value */
+}
+
+uint64_t platform_timer_get_noirq(struct timer *timer)
+{
+	uint32_t flags;
+	uint64_t ticks_now;
+
+	spin_lock_irq(&timer_lock, flags);
+	ticks_now = platform_timer_get(timer);
+	spin_unlock_irq(&timer_lock, flags);
+
+	return ticks_now;
 }
 
 /* get timestamp for host stream DMA position */
