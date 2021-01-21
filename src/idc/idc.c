@@ -16,6 +16,7 @@
 #include <sof/lib/notifier.h>
 #include <sof/lib/uuid.h>
 #include <sof/platform.h>
+#include <arch/lib/wait.h>
 #include <sof/schedule/edf_schedule.h>
 #include <sof/schedule/ll_schedule.h>
 #include <sof/schedule/schedule.h>
@@ -93,6 +94,10 @@ int idc_wait_in_blocking_mode(uint32_t target_core, bool (*cond)(int))
 		IDC_TIMEOUT / 1000;
 
 	while (!cond(target_core)) {
+
+		/* spin here so other core can access IO and timers freely */
+		idelay(8192);
+
 		if (deadline < platform_timer_get(timer)) {
 			/* safe check in case we've got preempted
 			 * after read
